@@ -14,22 +14,49 @@ namespace OF_DL.Helpers
     public class DBHelper : IDBHelper
     {
         private readonly IDownloadConfig downloadConfig;
+        private readonly string dbBasePath = $"{Environment.CurrentDirectory}/OnlyFans";
 
         public DBHelper(IDownloadConfig downloadConfig)
         {
             this.downloadConfig = downloadConfig;
         }
 
-        public async Task CreateDB(string folder)
+        public DBHelper(IDownloadConfig downloadConfig,string metaDataPath)
         {
+            this.downloadConfig = downloadConfig;
+            this.dbBasePath = metaDataPath;
+        }
+
+        public DateTime GetLastAccessedDateTime(string folder)
+        {
+            DateTime ret = DateTime.UnixEpoch;
+            string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name, "user_data.db")}";
+
+            if (new FileInfo(dbFilePath).Exists)
+            {
+                ret = new FileInfo(dbFilePath).LastAccessTimeUtc;
+            }
+
+            return ret;
+        }
+
+        public async Task<DateTime> CreateUserDB(string folder)
+        {
+            DateTime ret = DateTime.UnixEpoch;
             try
             {
-                if (!Directory.Exists(folder + "/Metadata"))
+                if (!Directory.Exists(Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name)))
                 {
-                    Directory.CreateDirectory(folder + "/Metadata");
+                    Directory.CreateDirectory(Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name));
                 }
 
-                string dbFilePath = $"{folder}/Metadata/user_data.db";
+                string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name,"user_data.db")}";
+
+                if(new FileInfo(dbFilePath).Exists)
+                {
+                    ret = new FileInfo(dbFilePath).LastAccessTimeUtc;
+                }
+                
 
                 // connect to the new database file
                 using SqliteConnection connection = new($"Data Source={dbFilePath}");
@@ -130,13 +157,16 @@ namespace OF_DL.Helpers
                     Log.Error("Inner Exception: {0}\n\nStackTrace: {1}", ex.InnerException.Message, ex.InnerException.StackTrace);
                 }
             }
+
+            return ret;
         }
 
         public async Task CreateUsersDB(Dictionary<string, int> users)
         {
             try
             {
-                using SqliteConnection connection = new($"Data Source={Directory.GetCurrentDirectory()}/users.db");
+                Directory.CreateDirectory(this.dbBasePath);
+                using SqliteConnection connection = new($"Data Source={Path.Combine(this.dbBasePath, "users.db")}");
                 Log.Debug("Database data source: " + connection.DataSource);
 
                 connection.Open();
@@ -191,7 +221,7 @@ namespace OF_DL.Helpers
         {
             try
             {
-                using SqliteConnection connection = new($"Data Source={Directory.GetCurrentDirectory()}/users.db");
+                using SqliteConnection connection = new($"Data Source={Path.Combine(this.dbBasePath,"users.db")}");
 
                 connection.Open();
 
@@ -244,7 +274,8 @@ namespace OF_DL.Helpers
         {
             try
             {
-                using SqliteConnection connection = new($"Data Source={folder}/Metadata/user_data.db");
+                string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name,"user_data.db")}";
+                using SqliteConnection connection = new($"Data Source={dbFilePath}");
                 connection.Open();
                 using SqliteCommand cmd = new($"SELECT COUNT(*) FROM messages WHERE post_id=@post_id", connection);
                 cmd.Parameters.AddWithValue("@post_id", post_id);
@@ -281,7 +312,9 @@ namespace OF_DL.Helpers
         {
             try
             {
-                using SqliteConnection connection = new($"Data Source={folder}/Metadata/user_data.db");
+                
+                string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name,"user_data.db")}";
+                using SqliteConnection connection = new($"Data Source={dbFilePath}");
                 connection.Open();
                 using SqliteCommand cmd = new($"SELECT COUNT(*) FROM posts WHERE post_id=@post_id", connection);
                 cmd.Parameters.AddWithValue("@post_id", post_id);
@@ -317,7 +350,8 @@ namespace OF_DL.Helpers
         {
             try
             {
-                using SqliteConnection connection = new($"Data Source={folder}/Metadata/user_data.db");
+                string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name,"user_data.db")}";
+                using SqliteConnection connection = new($"Data Source={dbFilePath}");
                 connection.Open();
                 using SqliteCommand cmd = new($"SELECT COUNT(*) FROM stories WHERE post_id=@post_id", connection);
                 cmd.Parameters.AddWithValue("@post_id", post_id);
@@ -353,7 +387,8 @@ namespace OF_DL.Helpers
         {
             try
             {
-                using SqliteConnection connection = new($"Data Source={folder}/Metadata/user_data.db");
+                string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name,"user_data.db")}";
+                using SqliteConnection connection = new($"Data Source={dbFilePath}");
                 connection.Open();
 
                 StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM medias WHERE media_id=@media_id");
@@ -393,7 +428,8 @@ namespace OF_DL.Helpers
             {
                 bool downloaded = false;
 
-                using (SqliteConnection connection = new($"Data Source={folder}/Metadata/user_data.db"))
+                string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name,"user_data.db")}";
+                using (SqliteConnection connection = new($"Data Source={dbFilePath}"))
                 {
                     StringBuilder sql = new StringBuilder("SELECT downloaded FROM medias WHERE media_id=@media_id");
                     if(downloadConfig.DownloadDuplicatedMedia)
@@ -426,7 +462,8 @@ namespace OF_DL.Helpers
 
         public async Task UpdateMedia(string folder, long media_id, string api_type, string directory, string filename, long size, bool downloaded, DateTime created_at)
         {
-            using SqliteConnection connection = new($"Data Source={folder}/Metadata/user_data.db");
+            string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name,"user_data.db")}";
+            using SqliteConnection connection = new($"Data Source={dbFilePath}") ;
             connection.Open();
 
             // Construct the update command
@@ -455,7 +492,8 @@ namespace OF_DL.Helpers
         public async Task<long> GetStoredFileSize(string folder, long media_id, string api_type)
         {
             long size;
-            using (SqliteConnection connection = new($"Data Source={folder}/Metadata/user_data.db"))
+            string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name,"user_data.db")}";
+            using (SqliteConnection connection = new($"Data Source={dbFilePath}"))
             {
                 connection.Open();
                 using SqliteCommand cmd = new($"SELECT size FROM medias WHERE media_id=@media_id and api_type=@api_type", connection);
@@ -466,10 +504,42 @@ namespace OF_DL.Helpers
             return size;
         }
 
+        public async Task<string?> GetMostRecentMessageId(string folder)
+        {
+            string? mostRecentId = null;
+            string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name, "user_data.db")}";
+            using (SqliteConnection connection = new($"Data Source={dbFilePath}"))
+            {
+                connection.Open();
+                using SqliteCommand cmd = new(@"
+                    SELECT
+    MIN(post_id) AS id
+FROM  (
+        SELECT MAX(P.post_id) AS post_id
+        FROM   messages AS P
+        LEFT OUTER JOIN medias AS m
+                ON P.post_id = m.post_id
+               AND m.downloaded = 1
+        UNION
+        SELECT MIN(P.post_id) AS post_id
+        FROM   messages AS P
+        INNER JOIN medias AS m
+                ON P.post_id = m.post_id
+        WHERE m.downloaded = 0)", connection);
+                var scalarValue = await cmd.ExecuteScalarAsync();
+                if (scalarValue != null && scalarValue != DBNull.Value)
+                {
+                    mostRecentId = Convert.ToString(scalarValue);
+                }
+            }
+            return mostRecentId;
+        }
+
         public async Task<DateTime?> GetMostRecentPostDate(string folder)
         {
             DateTime? mostRecentDate = null;
-            using (SqliteConnection connection = new($"Data Source={folder}/Metadata/user_data.db"))
+            string dbFilePath = $"{Path.Combine(this.dbBasePath, new DirectoryInfo(folder).Name,"user_data.db")}";
+            using (SqliteConnection connection = new($"Data Source={dbFilePath}"))
             {
                 connection.Open();
                 using SqliteCommand cmd = new(@"

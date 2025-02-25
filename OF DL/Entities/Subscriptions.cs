@@ -8,8 +8,26 @@ namespace OF_DL.Entities
 {
     public class Subscriptions
     {
-        public List<List> list { get; set; }
+        
+
+        public List<List> list { get; set; }= new List<List>();
         public bool hasMore { get; set; }
+        public IEnumerable<List> ListByExpiration { get
+
+            {
+
+                return list.OrderBy(s=> {
+                    if ((bool)s.subscribedIsExpiredNow) return DateTime.Now.AddDays(7);
+
+                    if ((bool)s.subscribedByAutoprolong) return s.subscribedByExpireDate.Value.AddDays(7);
+
+                    if(Double.Parse(s.subscribePrice)==0.0) return s.subscribedByExpireDate.Value.AddDays(7);
+                    return s.subscribedByExpireDate;
+                }).AsEnumerable<List>();
+            }}
+
+        
+
         public class AvatarThumbs
         {
             public string c50 { get; set; }
@@ -58,6 +76,15 @@ namespace OF_DL.Entities
             public bool? isPaywallRequired { get; set; }
             public bool? unprofitable { get; set; }
             public List<ListsState> listsStates { get; set; }
+
+            public IEnumerable<string> collections
+            {
+                get
+
+                {
+                    return listsStates.Where(l => l.@type == "custom" || (l.@type == "bookmarks" && l.hasUser == true)).Select(l=>l.name).ToList();
+                }
+            }
             public bool? isMuted { get; set; }
             public bool? isRestricted { get; set; }
             public bool? canRestrict { get; set; }

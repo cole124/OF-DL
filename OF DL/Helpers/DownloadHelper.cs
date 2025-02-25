@@ -37,7 +37,7 @@ public class DownloadHelper : IDownloadHelper
     public DownloadHelper(Auth auth, IDownloadConfig downloadConfig, IFileNameFormatConfig fileNameFormatConfig)
     {
         this.auth = auth;
-        this.m_DBHelper = new DBHelper(downloadConfig);
+        this.m_DBHelper = new DBHelper(downloadConfig, $"{Environment.CurrentDirectory}/{auth.USER_ID}/OnlyFans/");
         this._FileNameHelper = new FileNameHelper(auth);
         this.downloadConfig = downloadConfig;
         this.fileNameFormatConfig = fileNameFormatConfig;

@@ -82,6 +82,15 @@ namespace OF_DL.Entities
         public bool? showMediaCount { get; set; }
         public SubscribedByData subscribedByData { get; set; }
         public SubscribedOnData subscribedOnData { get; set; }
+
+        public IEnumerable<string> collections
+        {
+            get
+
+            {
+                return listsStates.Where(l => l.@type == "custom" || (l.@type == "bookmarks" && l.hasUser == true)).Select(l => l.name).ToList();
+            }
+        }
         public bool? canPromotion { get; set; }
         public bool? canCreatePromotion { get; set; }
         public bool? canCreateTrial { get; set; }

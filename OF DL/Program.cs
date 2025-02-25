@@ -17,6 +17,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using static OF_DL.Entities.Lists.UserList;
 using static OF_DL.Entities.Messages.Messages;
 
 namespace OF_DL;
@@ -354,42 +355,94 @@ public class Program
 
     private static async Task DownloadAllData(APIHelper m_ApiHelper, Auth Auth, Config Config)
     {
-        DBHelper dBHelper = new DBHelper(Config);
+        DBHelper dBHelper = new DBHelper(Config, $"{Environment.CurrentDirectory}/{auth.USER_ID}/OnlyFans/");
 
         Log.Debug("Calling DownloadAllData");
 
         do
         {
             DateTime startTime = DateTime.Now;
-            Dictionary<string, int> users = new();
-            Dictionary<string, int> activeSubs = await m_ApiHelper.GetActiveSubscriptions("/subscriptions/subscribes", Config.IncludeRestrictedSubscriptions, Config);
-
+            Dictionary<string, (int id, DateTime expiration,DateTime LastAccessed)> users = new();
+            Dictionary<string, (int id, DateTime expiration)> activeSubs = await m_ApiHelper.GetActiveSubscriptions("/subscriptions/subscribes", Config.IncludeRestrictedSubscriptions, Config);
+            Dictionary<string, (int id, DateTime expiration)> expiredSubs = await m_ApiHelper.GetExpiredSubscriptions("/subscriptions/subscribes", Config.IncludeRestrictedSubscriptions, Config);
             Log.Debug("Subscriptions: ");
 
-            foreach (KeyValuePair<string, int> activeSub in activeSubs)
+            foreach (KeyValuePair<string, (int id, DateTime expiration)> activeSub in activeSubs.OrderBy(s=>s.Value.expiration))
             {
                 if (!users.ContainsKey(activeSub.Key))
                 {
-                    users.Add(activeSub.Key, activeSub.Value);
+                    users.Add(activeSub.Key, (activeSub.Value.id, activeSub.Value.expiration, dBHelper.GetLastAccessedDateTime(activeSub.Key)));
                     Log.Debug($"Name: {activeSub.Key} ID: {activeSub.Value}");
                 }
             }
             if (Config!.IncludeExpiredSubscriptions)
             {
                 Log.Debug("Inactive Subscriptions: ");
-
-                Dictionary<string, int> expiredSubs = await m_ApiHelper.GetExpiredSubscriptions("/subscriptions/subscribes", Config.IncludeRestrictedSubscriptions, Config);
-                foreach (KeyValuePair<string, int> expiredSub in expiredSubs)
+                foreach (KeyValuePair<string, (int id, DateTime expiration)> expiredSub in expiredSubs.OrderByDescending(s => s.Value.expiration))
                 {
                     if (!users.ContainsKey(expiredSub.Key))
                     {
-                        users.Add(expiredSub.Key, expiredSub.Value);
+                        users.Add(expiredSub.Key, (expiredSub.Value.id, expiredSub.Value.expiration, dBHelper.GetLastAccessedDateTime(expiredSub.Key)));
                         Log.Debug($"Name: {expiredSub.Key} ID: {expiredSub.Value}");
                     }
                 }
             }
-            await dBHelper.CreateUsersDB(users);
+            await dBHelper.CreateUsersDB(users.ToDictionary(s => s.Key, s => s.Value.id));
             Dictionary<string, int> lists = await m_ApiHelper.GetLists("/lists", Config);
+            Dictionary<string, int> promoUsers = new Dictionary<string, int>();
+            foreach (var list in lists)
+            {
+                List<string> usernames = await m_ApiHelper.GetListUsers($"/lists/{list.Value}/users", Config);
+
+                foreach(string username in usernames)
+                {
+                    if (!users.Keys.Contains(username))
+                    {
+                        Entities.User user_info = await m_ApiHelper.GetUserInfo($"/users/{username}");
+                        DateTime lastAccessed = dBHelper.GetLastAccessedDateTime(username);
+
+                        if(user_info !=null && user_info.username !=null && !users.ContainsKey(user_info.username))
+                        {
+                            if (user_info.about != null && user_info.about.Contains("/trial/"))
+                            {
+                                await m_ApiHelper.CheckPromoLink(Config, user_info.about);
+                            }
+
+                            DateTime expiration = user_info.subscribedByExpireDate ?? DateTime.Today;
+                            if (user_info.subscribedIsExpiredNow ?? true) expiration = DateTime.Now.AddDays(7);
+
+                            try
+                            {
+                                if (Double.Parse(user_info.subscribePrice ?? "0") == 0.0) expiration = expiration.AddDays(7);
+                            }
+                            catch (Exception ex)
+                            {
+                                ;
+                            }
+
+                            if ((!user_info.subscribedBy.HasValue || (user_info.subscribedBy.HasValue && !user_info.subscribedBy.Value)) && (user_info.canAddSubscriber.HasValue && user_info.canAddSubscriber.Value) && (Convert.ToDouble(user_info.subscribePrice) == 0.0))
+                            {
+                                    promoUsers.TryAdd(user_info.username, user_info.id.GetValueOrDefault());   
+                            }
+
+                            if (!m_ApiHelper.ignoredUsers.Contains(user_info.id.Value) && user_info.collections.Count() > 0 && m_ApiHelper.IgnoredLists.Intersect(user_info.collections, StringComparer.OrdinalIgnoreCase).Count() > 0)
+                            {
+                                m_ApiHelper.ignoredUsers.Add(user_info.id.Value);
+                            }
+                            users.Add(user_info.username, (user_info.id.Value,expiration, lastAccessed));
+                        }
+                    }
+                }
+            }
+            if(promoUsers.Count>0)
+            {
+                m_ApiHelper.ExportUsers(DateTime.Now.ToString("yyyyMMddhhmmss") + "_promos", promoUsers);
+            }
+
+            m_ApiHelper.ExportUsers("Ignored", users.Where(u=>m_ApiHelper.ignoredUsers.Contains(u.Value.id)).ToDictionary(u=>u.Key,u=>u.Value));
+            m_ApiHelper.ExportUsers("All", users);
+            
+
             KeyValuePair<bool, Dictionary<string, int>> hasSelectedUsersKVP;
             if(Config.NonInteractiveMode && Config.NonInteractiveModePurchasedTab)
             {
@@ -397,7 +450,7 @@ public class Program
             }
             else if (Config.NonInteractiveMode && string.IsNullOrEmpty(Config.NonInteractiveModeListName))
             {
-                hasSelectedUsersKVP = new KeyValuePair<bool, Dictionary<string, int>>(true, users);
+                hasSelectedUsersKVP = new KeyValuePair<bool, Dictionary<string, int>>(true, users.OrderBy(s => s.Value.expiration).ToDictionary(s => s.Key, s => s.Value.id));
             }
             else if (Config.NonInteractiveMode && !string.IsNullOrEmpty(Config.NonInteractiveModeListName))
             {
@@ -408,7 +461,7 @@ public class Program
                 {
                     listUsernames.Add(user);
                 }
-                var selectedUsers = users.Where(x => listUsernames.Contains($"{x.Key}")).Distinct().ToDictionary(x => x.Key, x => x.Value);
+                var selectedUsers = users.Where(x => listUsernames.Contains($"{x.Key}")).Distinct().ToDictionary(x => x.Key, x => x.Value.id);
                 hasSelectedUsersKVP = new KeyValuePair<bool, Dictionary<string, int>>(true, selectedUsers);
             }
             else
@@ -454,6 +507,8 @@ public class Program
                         path = $"__user_data__/sites/OnlyFans/{username}";
                     }
 
+                    string dbpath= $"{Environment.CurrentDirectory}/OnlyFans/{username}";
+
                     Log.Debug($"Download path: {path}");
 
                     if (!Directory.Exists(path)) 
@@ -467,16 +522,21 @@ public class Program
                         AnsiConsole.Markup($"[red]Folder for {username} already created\n[/]");
                     }
 
-                    await dBHelper.CreateDB(path);
+                    if (!Directory.Exists(dbpath))
+                    {
+                        Directory.CreateDirectory(dbpath);
+                    }
+
+                    await dBHelper.CreateUserDB(dbpath);
 
                     var downloadContext = new DownloadContext(Auth, Config, GetCreatorFileNameFormatConfig(Config, username), m_ApiHelper, dBHelper);
 
-                    await DownloadSinglePost(downloadContext, post_id, path, users);
+                    await DownloadSinglePost(downloadContext, post_id, path, users.ToDictionary(s => s.Key, s => s.Value.id));
                 }
             }
             else if (hasSelectedUsersKVP.Key && hasSelectedUsersKVP.Value != null && hasSelectedUsersKVP.Value.ContainsKey("PurchasedTab"))
             {
-                Dictionary<string, int> purchasedTabUsers = await m_ApiHelper.GetPurchasedTabUsers("/posts/paid", Config, users);
+                Dictionary<string, int> purchasedTabUsers = await m_ApiHelper.GetPurchasedTabUsers("/posts/paid", Config, users.ToDictionary(s => s.Key, s => s.Value.id));
                 AnsiConsole.Markup($"[red]Checking folders for Users in Purchased Tab\n[/]");
                 foreach (KeyValuePair<string, int> user in purchasedTabUsers)
                 {
@@ -508,7 +568,7 @@ public class Program
 
                     Entities.User user_info = await m_ApiHelper.GetUserInfo($"/users/{user.Key}");
 
-                    await dBHelper.CreateDB(path);
+                    await dBHelper.CreateUserDB(path);
                 }
 
                 string p = "";
@@ -523,7 +583,7 @@ public class Program
 
                 Log.Debug($"Download path: {p}");
 
-                List<PurchasedTabCollection> purchasedTabCollections = await m_ApiHelper.GetPurchasedTab("/posts/paid", p, Config, users);
+                List<PurchasedTabCollection> purchasedTabCollections = await m_ApiHelper.GetPurchasedTab("/posts/paid", p, Config, users.ToDictionary(s => s.Key, s => s.Value.id));
                 foreach(PurchasedTabCollection purchasedTabCollection in purchasedTabCollections)
                 {
                     AnsiConsole.Markup($"[red]\nScraping Data for {purchasedTabCollection.Username}\n[/]");
@@ -544,8 +604,8 @@ public class Program
 
                     int paidPostCount = 0;
                     int paidMessagesCount = 0;
-                    paidPostCount = await DownloadPaidPostsPurchasedTab(downloadContext, purchasedTabCollection.PaidPosts, users.FirstOrDefault(u => u.Value == purchasedTabCollection.UserId), paidPostCount, path, users);
-                    paidMessagesCount = await DownloadPaidMessagesPurchasedTab(downloadContext, purchasedTabCollection.PaidMessages, users.FirstOrDefault(u => u.Value == purchasedTabCollection.UserId), paidMessagesCount, path, users);
+                    paidPostCount = await DownloadPaidPostsPurchasedTab(downloadContext, purchasedTabCollection.PaidPosts, users.ToDictionary(s => s.Key, s => s.Value.id).FirstOrDefault(u => u.Value == purchasedTabCollection.UserId), paidPostCount, path, users.ToDictionary(s => s.Key, s => s.Value.id));
+                    paidMessagesCount = await DownloadPaidMessagesPurchasedTab(downloadContext, purchasedTabCollection.PaidMessages, users.ToDictionary(s => s.Key, s => s.Value.id).FirstOrDefault(u => u.Value == purchasedTabCollection.UserId), paidMessagesCount, path, users.ToDictionary(s => s.Key, s => s.Value.id));
 
                     AnsiConsole.Markup("\n");
                     AnsiConsole.Write(new BreakdownChart()
@@ -620,7 +680,7 @@ public class Program
                     Log.Debug($"Folder for {username} already created");
                 }
 
-                await dBHelper.CreateDB(path);
+                await dBHelper.CreateUserDB(path);
 
                 var downloadContext = new DownloadContext(Auth, Config, GetCreatorFileNameFormatConfig(Config, username), m_ApiHelper, dBHelper);
 
@@ -670,7 +730,7 @@ public class Program
                         Log.Debug($"Folder for {user.Key} already created");
                     }
 
-                    await dBHelper.CreateDB(path);
+                    await dBHelper.CreateUserDB($"{user.Key}");
 
                     var downloadContext = new DownloadContext(Auth, Config, GetCreatorFileNameFormatConfig(Config, user.Key), m_ApiHelper, dBHelper);
 
@@ -2180,25 +2240,33 @@ public class Program
         }
     }
 
-    public static async Task<(bool IsExit, Dictionary<string, int>? selectedUsers, Config? updatedConfig)> HandleUserSelection(APIHelper apiHelper, Config currentConfig, Dictionary<string, int> users, Dictionary<string, int> lists)
+    public static async Task<(bool IsExit, Dictionary<string, int>? selectedUsers, Config? updatedConfig)> HandleUserSelection(APIHelper apiHelper, Config currentConfig, Dictionary<string, (int id, DateTime expiration,DateTime LastAccessed)> users, Dictionary<string, int> lists)
     {
         bool hasSelectedUsers = false;
         Dictionary<string, int> selectedUsers = new Dictionary<string, int>();
 
         while (!hasSelectedUsers)
         {
-            var mainMenuOptions = GetMainMenuOptions(users, lists);
+            var mainMenuOptions = GetMainMenuOptions(users.OrderBy(s => s.Value.expiration).ToDictionary(s => s.Key, s => s.Value.id), lists);
 
             var mainMenuSelection = AnsiConsole.Prompt(
                 new SelectionPrompt<string>()
-                    .Title("[red]Select Accounts to Scrape | Select All = All Accounts | List = Download content from users on List | Custom = Specific Account(s)[/]")
+                    .Title("[red]Select Accounts to Scrape | Select All = All Accounts | List = Download content from users on List | Expires Soon = Download content from soon to expire users | Custom = Specific Account(s)[/]")
                     .AddChoices(mainMenuOptions)
             );
 
             switch (mainMenuSelection)
             {
                 case "[red]Select All[/]":
-                    selectedUsers = users;
+                    selectedUsers = users.OrderBy(s => s.Value.expiration).ThenBy(s => s.Value.LastAccessed).ToDictionary(s => s.Key, s => s.Value.id);
+                    hasSelectedUsers = true;
+                    break;
+                case "[red]Expires Soon[/]":
+                    selectedUsers = users.Where(s=>s.Value.expiration<=DateTime.Now.AddDays(7)).OrderBy(s => s.Value.expiration).ThenBy(s => s.Value.LastAccessed).ToDictionary(s => s.Key, s => s.Value.id);
+                    hasSelectedUsers = true;
+                    break;
+                case "[red]New Subs[/]":
+                    selectedUsers = users.Where(s => s.Value.LastAccessed == DateTime.UnixEpoch || s.Value.LastAccessed<DateTime.Now.AddDays(-15)).OrderBy(s => s.Value.expiration).ThenBy(s=>s.Value.LastAccessed).ToDictionary(s => s.Key, s => s.Value.id);
                     hasSelectedUsers = true;
                     break;
                 case "[red]List[/]":
@@ -2231,7 +2299,7 @@ public class Program
                                     listUsernames.Add(user);
                                 }
                             }
-                            selectedUsers = users.Where(x => listUsernames.Contains($"{x.Key}")).Distinct().ToDictionary(x => x.Key, x => x.Value);
+                            selectedUsers = users.Where(x => listUsernames.Contains($"{x.Key}")).Distinct().OrderBy(s => s.Value.expiration).ThenBy(s => s.Value.LastAccessed).ToDictionary(x => x.Key, x => x.Value.id);
                             AnsiConsole.Markup(string.Format("[red]Downloading from List(s): {0}[/]", string.Join(", ", listSelection)));
                             break;
                         }
@@ -2258,7 +2326,7 @@ public class Program
                         else
                         {
                             hasSelectedUsers = true;
-                            selectedUsers = users.Where(x => userSelection.Contains($"[red]{x.Key}[/]")).ToDictionary(x => x.Key, x => x.Value);
+                            selectedUsers = users.Where(x => userSelection.Contains($"[red]{x.Key}[/]")).OrderBy(s => s.Value.expiration).ThenBy(s => s.Value.LastAccessed).ToDictionary(x => x.Key, x => x.Value.id);
                             break;
                         }
                     }
@@ -2420,7 +2488,8 @@ public class Program
             return new List<string>
             {
                 "[red]Select All[/]",
-                "[red]List[/]",
+                "[red]List[/]","[red]Expires Soon[/]",
+                "[red]New Subs[/]",
                 "[red]Custom[/]",
                 "[red]Download Single Post[/]",
                 "[red]Download Single Message[/]",

@@ -1,0 +1,9 @@
+{
+    "USER_ID": "184995839",
+    "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0",
+    "X_BC": "a61842e78c6c1b4b3b3c84156e13bccda7143754",
+    "COOKIE": "__cf_bm=rVurRFR508D2aHbZ8omr4CeXOVLHOSmPftnclJhYhXg-1723729605-1.0.1.1-DCbxmQ_waJNPgyrQJ_PII2H0iytM.SaPFCyALWD4X9x3QF8auXL0mGjTsEw8fwtn.yQATvP0TrKmbXNm.VdlZA; _cfuvid=roq2t053_QLa8ANjnLfUWehfMRAW9HlRxZzyiRAsvDU-1723729605685-0.0.1.1-604800000; fp=a61842e78c6c1b4b3b3c84156e13bccda7143754; csrf=O4U74dDVfc7174b8a266601d3a54ff0cfd7e3370; lang=en; sess=8ljprp7ogoni4ucglpecqm9ho8; auth_id=184995839; streams=channel_5375304; st=1f3ba87f1a45f24a86d27056c436ce646c5537e8435f009434d50ec2ae4440dc; cookiesAccepted=all; ref_src=",
+    "YTDLP_PATH": "C:/Utils/yt-dlp.exe",
+    "FFMPEG_PATH": "C:/Utils/ffmpeg-6.0-full_build/bin/ffmpeg.exe",
+    "MP4DECRYPT_PATH": "C:/Utils/Bento4-SDK-1-6-0-640.x86_64-microsoft-win32/bin/mp4decrypt.exe"
+}

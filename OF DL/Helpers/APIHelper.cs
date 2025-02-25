@@ -1,3 +1,4 @@
+using Microsoft.CSharp.RuntimeBinder;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using OF_DL.Entities;
@@ -12,9 +13,12 @@ using OF_DL.Entities.Streams;
 using OF_DL.Enumurations;
 using Serilog;
 using System.Globalization;
+using System.Linq;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using WidevineClient.Widevine;
 using static WidevineClient.HttpUtil;
@@ -27,6 +31,11 @@ public class APIHelper : IAPIHelper
     private readonly IDBHelper m_DBHelper;
     private readonly Auth auth;
 
+    public List<int> ignoredUsers = new List<int>();
+    public string[] ignoredText = new string[] { "#announcement", "#ad", " she " };
+    public string[] IgnoredLists = new[] { "Ignored"};
+    public List<string> promoLinks = new List<string>();
+
     static APIHelper()
     {
         m_JsonSerializerSettings = new()
@@ -38,7 +47,7 @@ public class APIHelper : IAPIHelper
     public APIHelper(Auth auth, IDownloadConfig downloadConfig)
     {
         this.auth = auth;
-        m_DBHelper = new DBHelper(downloadConfig);
+        m_DBHelper = new DBHelper(downloadConfig, $"{Environment.CurrentDirectory}/{auth.USER_ID}/OnlyFans/");
     }
 
 
@@ -82,9 +91,62 @@ public class APIHelper : IAPIHelper
     {
         Log.Debug("Calling BuildHeaderAndExecuteRequests");
 
-        HttpRequestMessage request = await BuildHttpRequestMessage(getParams, endpoint);
+        
+        string body="";
+        int cnt = 0;
+        while(cnt<10)
+        {
+            cnt++;
+            HttpRequestMessage request = await BuildHttpRequestMessage(getParams, endpoint);
+            using var response = await client.SendAsync(request);
+            if (response.StatusCode==HttpStatusCode.TooManyRequests)
+            {
+                Thread.Sleep(cnt * 2000);
+            } else
+            {
+                try
+                {
+                    response.EnsureSuccessStatusCode();
+                    body = await response.Content.ReadAsStringAsync();
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    break;
+                }
+            }
+                
+            
+        }
+        
+        
+
+        Log.Debug(body);
+
+        return body;
+    }
+
+    private async Task<string?> BuildHeaderAndExecutePosts(Dictionary<string, string> getParams, string endpoint, HttpClient client)
+    {
+        Log.Debug("Calling BuildHeaderAndExecuteRequests");
+
+        string jStr = "{\"code\":\"" + getParams["code"] + "\",\"reserve\":false}";
+
+        HttpRequestMessage request = await BuildHttpRequestMessage(new Dictionary<string, string>(), endpoint);
+        request.Method = HttpMethod.Post;
+        request.Headers.Add("Accept", "application/json");
+        
+        request.Content= new StringContent(
+    jStr,//JsonConvert.SerializeObject(getParams).ToString(),
+    Encoding.UTF8,
+    "application/json"
+);
         using var response = await client.SendAsync(request);
-        response.EnsureSuccessStatusCode();
+        try
+        {
+            response.EnsureSuccessStatusCode();
+        } catch (Exception ex) { }
+        
         string body = await response.Content.ReadAsStringAsync();
 
         Log.Debug(body);
@@ -255,12 +317,13 @@ public class APIHelper : IAPIHelper
     }
 
 
-    public async Task<Dictionary<string, int>?> GetAllSubscriptions(Dictionary<string, string> getParams, string endpoint, bool includeRestricted, IDownloadConfig config)
+    public async Task<Dictionary<string, (int id, DateTime expiration)>?> GetAllSubscriptions(Dictionary<string, string> getParams, string endpoint, bool includeRestricted, IDownloadConfig config)
     {
         try
         {
-            Dictionary<string, int> users = new();
+            Dictionary<string, (int id,DateTime expiration,string? price)> users = new();
             Subscriptions subscriptions = new();
+            Subscriptions ignoredSubscriptions = new();
 
             Log.Debug("Calling GetAllSubscrptions");
 
@@ -285,7 +348,13 @@ public class APIHelper : IAPIHelper
                         break;
                     }
 
+                    //subscriptions.list.AddRange(newSubscriptions.list.Where(s => s.collections.Count() == 0 || IgnoredLists.Intersect(s.collections, StringComparer.OrdinalIgnoreCase).Count() == 0).ToList());
                     subscriptions.list.AddRange(newSubscriptions.list);
+                    //if(subscriptions.list.Select(su => su.id).Contains(40179626))
+                    //{
+                    //    var sub= subscriptions.list.FirstOrDefault(su => su.id==40179626);
+                    //}
+                    ignoredSubscriptions.list.AddRange(newSubscriptions.list.Where(s => s.collections.Count() > 0 && IgnoredLists.Intersect(s.collections, StringComparer.OrdinalIgnoreCase).Count()>0).ToList());
                     if (!newSubscriptions.hasMore)
                     {
                         break;
@@ -294,17 +363,50 @@ public class APIHelper : IAPIHelper
                 }
             }
 
-            foreach (Subscriptions.List subscription in subscriptions.list)
+            foreach (Subscriptions.List sub in subscriptions.list.Where(s=>s.username==""))
             {
-
-                if ((!subscription.isRestricted ?? false || (subscription.isRestricted ?? false && includeRestricted))
-                    && !users.ContainsKey(subscription.username))
-                {
-                    users.Add(subscription.username, subscription.id);
-                }
+                ;
             }
 
-            return users;
+                if (subscriptions.list.Any(s=>s.collections.Count()==0))
+            {
+                ExportUsers("NoList", subscriptions.list.Where(s => s.collections.Count() == 0).Select(s => new { username = s.username, id = s.id }).Distinct().ToDictionary(s=>s.username,s=>s.id));
+            //    Console.WriteLine("Users Not on list");
+            //    foreach(var subscription in subscriptions.list.Where(s => s.collections.Count() == 0))
+            //{
+            //        Console.WriteLine(subscription.username);
+            //    }
+            }
+
+            foreach (Subscriptions.List subscription in subscriptions.ListByExpiration)
+            {
+                if (!users.ContainsKey(subscription.username))
+                {
+                    Entities.User? user_info = await GetUserInfo($"/users/{subscription.username}");
+                    if (user_info != null && user_info.username != null)
+                    {
+                        if (user_info.about != null && user_info.about.Contains("/trial/"))
+                        {
+                            await CheckPromoLink(config, user_info.about);
+                        }
+                    }
+
+                    DateTime expiration = subscription.subscribedByExpireDate?? DateTime.Today.AddDays(-1);
+                    if ((bool)subscription.subscribedIsExpiredNow) expiration = DateTime.Now.AddDays(-7);
+
+
+                    if (Double.Parse(subscription.subscribePrice) == 0.0) expiration = subscription.subscribedByExpireDate.Value.AddDays(3);
+
+
+                    users.Add(subscription.username, (subscription.id, expiration.Date,subscription.subscribePrice));
+                }
+            }
+            ignoredUsers.AddRange(subscriptions.list.Where(s => s.collections.Count() > 0 && IgnoredLists.Intersect(s.collections, StringComparer.CurrentCultureIgnoreCase).Count() > 0).Select(x => x.id).ToArray());
+            ExportUsers("ignored_"+getParams["type"], ignoredSubscriptions.list.Where(s=>s.collections.Contains("Ignored")).Select(s=>new { username = s.username, id = s.id,price=s.subscribePrice }).Distinct().ToDictionary(s => s.username, s => (s.id,s.price)));
+            int[] ignoredIds = ignoredSubscriptions.list.Where(s => s.collections.Contains("Ignored")).Select(s => s.id).ToArray();
+            ExportUsers(getParams["type"], users.Where(u=> !ignoredIds.Contains(u.Value.id)).ToDictionary(s => s.Key, s => (s.Value.id, s.Value.price)));
+
+            return users.ToDictionary(s=>s.Key,s=>(s.Value.id,s.Value.expiration));
         }
         catch (Exception ex)
         {
@@ -320,7 +422,36 @@ public class APIHelper : IAPIHelper
         return null;
     }
 
-    public async Task<Dictionary<string, int>?> GetActiveSubscriptions(string endpoint, bool includeRestricted, IDownloadConfig config)
+    public void ExportUsers(string v, Dictionary<string, int> dictionary)
+    {
+        if (File.Exists(v + ".dat")) File.Delete(v + ".dat");
+        File.WriteAllLines(v + ".dat", dictionary.Select(d => "'" + d.Key + "'," + d.Value).ToArray());
+    }
+
+    private void ExportUsers(string v, Dictionary<string, (int id,string? price)> dictionary)
+    {
+        if (File.Exists(v + ".dat")) File.Delete(v + ".dat");
+        File.WriteAllLines(v + ".dat", dictionary.Select(d => "'" + d.Key + "'," + d.Value.id+",'"+d.Value.price ?? ""+"'").ToArray());
+    }
+
+    public async Task ExportPromosAsync(string v, string promoString)
+    {
+        //if (File.Exists(v + ".dat")) File.Delete(v + ".dat");
+        await File.AppendAllTextAsync(v + ".dat", promoString+Environment.NewLine);
+    }
+
+    public void ExportUsers(string v, Dictionary<string, (int id, DateTime expiration,DateTime LastAccessed)> dictionary)
+    {
+        if (File.Exists(v + ".dat")) File.Delete(v + ".dat");
+        File.WriteAllLines(v + ".dat", dictionary.Select(d => "'" + d.Key + "'," + d.Value.id).ToArray());
+    }
+
+    private void ExportUsers(string v, List<Subscriptions.List> lists)
+    {
+        throw new NotImplementedException();
+    }
+
+    public async Task<Dictionary<string, (int id, DateTime expiration)>?> GetActiveSubscriptions(string endpoint, bool includeRestricted, IDownloadConfig config)
     {
         Dictionary<string, string> getParams = new()
         {
@@ -334,7 +465,7 @@ public class APIHelper : IAPIHelper
     }
 
 
-    public async Task<Dictionary<string, int>?> GetExpiredSubscriptions(string endpoint, bool includeRestricted, IDownloadConfig config)
+    public async Task<Dictionary<string, (int id, DateTime expiration)>?> GetExpiredSubscriptions(string endpoint, bool includeRestricted, IDownloadConfig config)
     {
 
         Dictionary<string, string> getParams = new()
@@ -430,6 +561,7 @@ public class APIHelper : IAPIHelper
                 { "limit", "50" }
             };
             List<string> users = new();
+            Dictionary<string, int> promoUsers = new Dictionary<string, int>();
 
             while (true)
             {
@@ -449,6 +581,10 @@ public class APIHelper : IAPIHelper
                 foreach (UsersList ul in usersList)
                 {
                     users.Add(ul.username);
+                    if ((!ul.subscribedBy.HasValue || (ul.subscribedBy.HasValue && !ul.subscribedBy.Value)) && (ul.canAddSubscriber.HasValue && ul.canAddSubscriber.Value) && (Convert.ToDouble(ul.subscribePrice)==0.0 || ul.promoOffers.Count > 0))
+                    {
+                        promoUsers.TryAdd(ul.username, ul.id.GetValueOrDefault());
+                    }
                 }
 
                 if (users.Count < 50)
@@ -459,6 +595,11 @@ public class APIHelper : IAPIHelper
                 offset += 50;
                 getParams["offset"] = Convert.ToString(offset);
 
+            }
+
+            if(promoUsers.Count>0)
+            {
+                ExportUsers(DateTime.Now.ToString("yyyyMMddhhmmss") + "_promos", promoUsers);
             }
             return users;
         }
@@ -714,100 +855,102 @@ public class APIHelper : IAPIHelper
                 }
 
             }
-
-            foreach (Purchased.List purchase in paidPosts.list)
+            if (paidPosts != null && paidPosts.list != null)
             {
-                if (purchase.responseType == "post" && purchase.media != null && purchase.media.Count > 0)
+                foreach (Purchased.List purchase in paidPosts.list)
                 {
-                    List<long> previewids = new();
-                    if (purchase.previews != null)
+                    if (purchase.responseType == "post" && purchase.media != null && purchase.media.Count > 0)
                     {
-                        for (int i = 0; i < purchase.previews.Count; i++)
+                        List<long> previewids = new();
+                        if (purchase.previews != null)
                         {
-                            if (!previewids.Contains((long)purchase.previews[i]))
+                            for (int i = 0; i < purchase.previews.Count; i++)
                             {
-                                previewids.Add((long)purchase.previews[i]);
-                            }
-                        }
-                    }
-                    else if (purchase.preview != null)
-                    {
-                        for (int i = 0; i < purchase.preview.Count; i++)
-                        {
-                            if (!previewids.Contains((long)purchase.preview[i]))
-                            {
-                                previewids.Add((long)purchase.preview[i]);
-                            }
-                        }
-                    }
-                    await m_DBHelper.AddPost(folder, purchase.id, purchase.text != null ? purchase.text : string.Empty, purchase.price != null ? purchase.price.ToString() : "0", purchase.price != null && purchase.isOpened ? true : false, purchase.isArchived.HasValue ? purchase.isArchived.Value : false, purchase.createdAt != null ? purchase.createdAt.Value : purchase.postedAt.Value);
-                    paidPostCollection.PaidPostObjects.Add(purchase);
-                    foreach (Messages.Medium medium in purchase.media)
-                    {
-                        if (!previewids.Contains(medium.id))
-                        {
-                            paid_post_ids.Add(medium.id);
-                        }
-
-                        if (medium.type == "photo" && !config.DownloadImages)
-                        {
-                            continue;
-                        }
-                        if (medium.type == "video" && !config.DownloadVideos)
-                        {
-                            continue;
-                        }
-                        if (medium.type == "gif" && !config.DownloadVideos)
-                        {
-                            continue;
-                        }
-                        if (medium.type == "audio" && !config.DownloadAudios)
-                        {
-                            continue;
-                        }
-                        if (previewids.Count > 0)
-                        {
-                            bool has = previewids.Any(cus => cus.Equals(medium.id));
-                            if (!has && medium.canView && medium.source != null && medium.source.source != null && !medium.source.source.Contains("upload"))
-                            {
-
-                                if (!paidPostCollection.PaidPosts.ContainsKey(medium.id))
+                                if (!previewids.Contains((long)purchase.previews[i]))
                                 {
-                                    await m_DBHelper.AddMedia(folder, medium.id, purchase.id, medium.source.source, null, null, null, "Posts", medium.type == "photo" ? "Images" : (medium.type == "video" || medium.type == "gif" ? "Videos" : (medium.type == "audio" ? "Audios" : null)), previewids.Contains(medium.id) ? true : false, false, null);
-                                    paidPostCollection.PaidPosts.Add(medium.id, medium.source.source);
-                                    paidPostCollection.PaidPostMedia.Add(medium);
+                                    previewids.Add((long)purchase.previews[i]);
                                 }
                             }
-                            else if (!has && medium.canView && medium.files != null && medium.files.drm != null)
+                        }
+                        else if (purchase.preview != null)
+                        {
+                            for (int i = 0; i < purchase.preview.Count; i++)
                             {
-
-                                if (!paidPostCollection.PaidPosts.ContainsKey(medium.id))
+                                if (!previewids.Contains((long)purchase.preview[i]))
                                 {
-                                    await m_DBHelper.AddMedia(folder, medium.id, purchase.id, medium.files.drm.manifest.dash, null, null, null, "Posts", medium.type == "photo" ? "Images" : (medium.type == "video" || medium.type == "gif" ? "Videos" : (medium.type == "audio" ? "Audios" : null)), previewids.Contains(medium.id) ? true : false, false, null);
-                                    paidPostCollection.PaidPosts.Add(medium.id, $"{medium.files.drm.manifest.dash},{medium.files.drm.signature.dash.CloudFrontPolicy},{medium.files.drm.signature.dash.CloudFrontSignature},{medium.files.drm.signature.dash.CloudFrontKeyPairId},{medium.id},{purchase.id}");
-                                    paidPostCollection.PaidPostMedia.Add(medium);
+                                    previewids.Add((long)purchase.preview[i]);
                                 }
-
                             }
                         }
-                        else
+                        await m_DBHelper.AddPost(folder, purchase.id, purchase.text != null ? purchase.text : string.Empty, purchase.price != null ? purchase.price.ToString() : "0", purchase.price != null && purchase.isOpened ? true : false, purchase.isArchived.HasValue ? purchase.isArchived.Value : false, purchase.createdAt != null ? purchase.createdAt.Value : purchase.postedAt.Value);
+                        paidPostCollection.PaidPostObjects.Add(purchase);
+                        foreach (Messages.Medium medium in purchase.media)
                         {
-                            if (medium.canView && medium.source != null && medium.source.source != null && !medium.source.source.Contains("upload"))
+                            if (!previewids.Contains(medium.id))
                             {
-                                if (!paidPostCollection.PaidPosts.ContainsKey(medium.id))
+                                paid_post_ids.Add(medium.id);
+                            }
+
+                            if (medium.type == "photo" && !config.DownloadImages)
+                            {
+                                continue;
+                            }
+                            if (medium.type == "video" && !config.DownloadVideos)
+                            {
+                                continue;
+                            }
+                            if (medium.type == "gif" && !config.DownloadVideos)
+                            {
+                                continue;
+                            }
+                            if (medium.type == "audio" && !config.DownloadAudios)
+                            {
+                                continue;
+                            }
+                            if (previewids.Count > 0)
+                            {
+                                bool has = previewids.Any(cus => cus.Equals(medium.id));
+                                if (!has && medium.canView && medium.source != null && medium.source.source != null && !medium.source.source.Contains("upload"))
                                 {
-                                    await m_DBHelper.AddMedia(folder, medium.id, purchase.id, medium.source.source, null, null, null, "Posts", medium.type == "photo" ? "Images" : (medium.type == "video" || medium.type == "gif" ? "Videos" : (medium.type == "audio" ? "Audios" : null)), previewids.Contains(medium.id) ? true : false, false, null);
-                                    paidPostCollection.PaidPosts.Add(medium.id, medium.source.source);
-                                    paidPostCollection.PaidPostMedia.Add(medium);
+
+                                    if (!paidPostCollection.PaidPosts.ContainsKey(medium.id))
+                                    {
+                                        await m_DBHelper.AddMedia(folder, medium.id, purchase.id, medium.source.source, null, null, null, "Posts", medium.type == "photo" ? "Images" : (medium.type == "video" || medium.type == "gif" ? "Videos" : (medium.type == "audio" ? "Audios" : null)), previewids.Contains(medium.id) ? true : false, false, null);
+                                        paidPostCollection.PaidPosts.Add(medium.id, medium.source.source);
+                                        paidPostCollection.PaidPostMedia.Add(medium);
+                                    }
+                                }
+                                else if (!has && medium.canView && medium.files != null && medium.files.drm != null)
+                                {
+
+                                    if (!paidPostCollection.PaidPosts.ContainsKey(medium.id))
+                                    {
+                                        await m_DBHelper.AddMedia(folder, medium.id, purchase.id, medium.files.drm.manifest.dash, null, null, null, "Posts", medium.type == "photo" ? "Images" : (medium.type == "video" || medium.type == "gif" ? "Videos" : (medium.type == "audio" ? "Audios" : null)), previewids.Contains(medium.id) ? true : false, false, null);
+                                        paidPostCollection.PaidPosts.Add(medium.id, $"{medium.files.drm.manifest.dash},{medium.files.drm.signature.dash.CloudFrontPolicy},{medium.files.drm.signature.dash.CloudFrontSignature},{medium.files.drm.signature.dash.CloudFrontKeyPairId},{medium.id},{purchase.id}");
+                                        paidPostCollection.PaidPostMedia.Add(medium);
+                                    }
+
                                 }
                             }
-                            else if (medium.canView && medium.files != null && medium.files.drm != null)
+                            else
                             {
-                                if (!paidPostCollection.PaidPosts.ContainsKey(medium.id))
+                                if (medium.canView && medium.source != null && medium.source.source != null && !medium.source.source.Contains("upload"))
                                 {
-                                    await m_DBHelper.AddMedia(folder, medium.id, purchase.id, medium.files.drm.manifest.dash, null, null, null, "Posts", medium.type == "photo" ? "Images" : (medium.type == "video" || medium.type == "gif" ? "Videos" : (medium.type == "audio" ? "Audios" : null)), previewids.Contains(medium.id) ? true : false, false, null);
-                                    paidPostCollection.PaidPosts.Add(medium.id, $"{medium.files.drm.manifest.dash},{medium.files.drm.signature.dash.CloudFrontPolicy},{medium.files.drm.signature.dash.CloudFrontSignature},{medium.files.drm.signature.dash.CloudFrontKeyPairId},{medium.id},{purchase.id}");
-                                    paidPostCollection.PaidPostMedia.Add(medium);
+                                    if (!paidPostCollection.PaidPosts.ContainsKey(medium.id))
+                                    {
+                                        await m_DBHelper.AddMedia(folder, medium.id, purchase.id, medium.source.source, null, null, null, "Posts", medium.type == "photo" ? "Images" : (medium.type == "video" || medium.type == "gif" ? "Videos" : (medium.type == "audio" ? "Audios" : null)), previewids.Contains(medium.id) ? true : false, false, null);
+                                        paidPostCollection.PaidPosts.Add(medium.id, medium.source.source);
+                                        paidPostCollection.PaidPostMedia.Add(medium);
+                                    }
+                                }
+                                else if (medium.canView && medium.files != null && medium.files.drm != null)
+                                {
+                                    if (!paidPostCollection.PaidPosts.ContainsKey(medium.id))
+                                    {
+                                        await m_DBHelper.AddMedia(folder, medium.id, purchase.id, medium.files.drm.manifest.dash, null, null, null, "Posts", medium.type == "photo" ? "Images" : (medium.type == "video" || medium.type == "gif" ? "Videos" : (medium.type == "audio" ? "Audios" : null)), previewids.Contains(medium.id) ? true : false, false, null);
+                                        paidPostCollection.PaidPosts.Add(medium.id, $"{medium.files.drm.manifest.dash},{medium.files.drm.signature.dash.CloudFrontPolicy},{medium.files.drm.signature.dash.CloudFrontSignature},{medium.files.drm.signature.dash.CloudFrontKeyPairId},{medium.id},{purchase.id}");
+                                        paidPostCollection.PaidPostMedia.Add(medium);
+                                    }
                                 }
                             }
                         }
@@ -857,7 +1000,7 @@ public class APIHelper : IAPIHelper
             }
             else if (config.DownloadPostsIncrementally)
             {
-                var mostRecentPostDate = await m_DBHelper.GetMostRecentPostDate(folder);
+                var mostRecentPostDate = await m_DBHelper.GetMostRecentPostDate(new DirectoryInfo(folder).Name);
                 if (mostRecentPostDate.HasValue)
                 {
                     downloadDateSelection = Enumerations.DownloadDateSelection.after;
@@ -886,7 +1029,7 @@ public class APIHelper : IAPIHelper
 
                     var loopbody = await BuildHeaderAndExecuteRequests(getParams, endpoint, GetHttpClient(config));
                     newposts = JsonConvert.DeserializeObject<Post>(loopbody, m_JsonSerializerSettings);
-
+                    if (newposts == null) break;
                     posts.list.AddRange(newposts.list);
                     if (!newposts.hasMore)
                     {
@@ -899,21 +1042,35 @@ public class APIHelper : IAPIHelper
                         newposts.tailMarker);
                 }
             }
-
+            if (posts == null) posts = new();
+            if (posts.list == null) posts.list = new();
             foreach (Post.List post in posts.list)
             {
                 if (config.SkipAds)
                 {
-                    if (post.rawText != null && (post.rawText.Contains("#ad") || post.rawText.Contains("/trial/") || post.rawText.Contains("#announcement")))
+                    if (post.text != null && post.text.Contains("/trial/"))
                     {
+                        await CheckPromoLink(config, post.text);
                         continue;
                     }
 
-                    if (post.text != null && (post.text.Contains("#ad") || post.text.Contains("/trial/") || post.rawText.Contains("#announcement")))
+
+                    if (post.rawText != null && post.rawText.Contains("/trial/"))
+                    {
+                        await CheckPromoLink(config, post.rawText);
+                        continue;
+                    }
+                    if(ignoredUsers.Contains(post.author.id))
                     {
                         continue;
                     }
+                    if ((post.rawText != null && ignoredText.Any(t=>post.rawText.Contains(t, StringComparison.CurrentCultureIgnoreCase))) || (post.text != null && ignoredText.Any(t => post.text.Contains(t))))
+                    {
+                        //|| post.rawText.Contains("/trial/")|| post.text.Contains("/trial/")
+                        continue;
+                    }
                 }
+                
                 List<long> postPreviewIds = new();
                 if (post.preview != null && post.preview.Count > 0)
                 {
@@ -953,7 +1110,7 @@ public class APIHelper : IAPIHelper
                         if (medium.canView && medium.files?.drm == null)
                         {
                             bool has = paid_post_ids.Any(cus => cus.Equals(medium.id));
-                            if (medium.source.source != null)
+                            if (medium.source !=null && medium.source.source != null)
                             {
                                 if (!has && !medium.source.source.Contains("upload"))
                                 {
@@ -1010,6 +1167,36 @@ public class APIHelper : IAPIHelper
         }
         return null;
     }
+
+    public async Task CheckPromoLink(IDownloadConfig config, string txt)
+    {
+        var re = new System.Text.RegularExpressions.Regex("(https:\\/\\/onlyfans.com\\/action\\/trial\\/([a-zA-Z0-9]{32}))");
+        foreach (Match m in re.Matches(txt))
+        {
+            if (!promoLinks.Contains(m.Groups[2].Value))
+            {
+                Console.WriteLine("'{0}' found at index {1}.", m.Value, m.Index);
+                var trialParams = new Dictionary<string, string>();
+                trialParams.Add("code", m.Groups[2].Value);
+                promoLinks.Add(m.Groups[2].Value);
+                var checkBody = await BuildHeaderAndExecutePosts(trialParams, "/trials/check", GetHttpClient(config));
+                
+                try
+                {
+                    dynamic tBody = JsonConvert.DeserializeObject(checkBody);
+                    var tstring = string.Format("{0},'{1}','{2}',{3}", tBody.user.id, tBody.user.username, m.Value,tBody.user.subscribePrice ?? 0);
+                    await ExportPromosAsync("Promos_" + DateTime.Today.ToString("yyyyMMdd"), tstring);
+                    // do stuff with x
+                }
+                catch (Exception e)
+                {
+                    ;
+                }
+            }
+
+        }
+    }
+
     public async Task<SinglePostCollection> GetPost(string endpoint, string folder, IDownloadConfig config)
     {
         Log.Debug($"Calling GetPost - {endpoint}");
@@ -1310,11 +1497,12 @@ public class APIHelper : IAPIHelper
                     var loopbody = await BuildHeaderAndExecuteRequests(getParams, endpoint, GetHttpClient(config));
                     newarchived = JsonConvert.DeserializeObject<Archived>(loopbody, m_JsonSerializerSettings);
 
-                    archived.list.AddRange(newarchived.list);
-                    if (!newarchived.hasMore)
+                    
+                    if (newarchived==null || !newarchived.hasMore)
                     {
                         break;
                     }
+                    archived.list.AddRange(newarchived.list);
                     UpdateGetParamsForDateSelection(
                        downloadDateSelection,
                        ref getParams,
@@ -1322,8 +1510,14 @@ public class APIHelper : IAPIHelper
                 }
             }
 
+            if (archived == null) archived = new();
+            if (archived.list == null) archived.list = new();
             foreach (Archived.List archive in archived.list)
             {
+                if(ignoredUsers.Contains(archive.author.id))
+                {
+                    continue;
+                }
                 List<long> previewids = new();
                 if (archive.preview != null)
                 {
@@ -1360,7 +1554,7 @@ public class APIHelper : IAPIHelper
                         {
                             continue;
                         }
-                        if (medium.canView && medium.files?.drm == null && !medium.source.source.Contains("upload"))
+                        if (medium.canView && medium.files?.drm == null && medium.source !=null && !medium.source.source.Contains("upload"))
                         {
                             if (!archivedCollection.ArchivedPosts.ContainsKey(medium.id))
                             {
@@ -1411,12 +1605,22 @@ public class APIHelper : IAPIHelper
             Dictionary<string, string> getParams = new()
             {
                 { "limit", post_limit.ToString() },
-                { "order", "desc" }
+                //{ "order", "asc" }
             };
+
+             if (config.DownloadPostsIncrementally)
+            {
+                var mostRecentPostDate = await m_DBHelper.GetMostRecentMessageId(new DirectoryInfo(folder).Name);
+                if (mostRecentPostDate !=null)
+                {
+                    getParams["id"] = mostRecentPostDate;
+                    getParams["order"]="asc";
+                }
+            }
 
             var body = await BuildHeaderAndExecuteRequests(getParams, endpoint, GetHttpClient(config));
             messages = JsonConvert.DeserializeObject<Messages>(body, m_JsonSerializerSettings);
-            if (messages.hasMore)
+            if (messages != null && messages.hasMore)
             {
                 getParams["id"] = messages.list[^1].id.ToString();
                 while (true)
@@ -1425,24 +1629,34 @@ public class APIHelper : IAPIHelper
 
                     var loopbody = await BuildHeaderAndExecuteRequests(getParams, endpoint, GetHttpClient(config));
                     newmessages = JsonConvert.DeserializeObject<Messages>(loopbody, m_JsonSerializerSettings);
-
-                    messages.list.AddRange(newmessages.list);
-                    if (!newmessages.hasMore)
+                    if(newmessages?.list!=null) messages.list.AddRange(newmessages.list);
+                    if (newmessages==null || !newmessages.hasMore)
                     {
                         break;
                     }
                     getParams["id"] = newmessages.list[newmessages.list.Count - 1].id.ToString();
                 }
             }
-
+            if(messages !=null) {
             foreach (Messages.List list in messages.list)
             {
                 if (config.SkipAds)
                 {
-                    if (list.text != null && (list.text.Contains("#ad") || list.text.Contains("/trial/")))
+                    
+                    if (list.text != null && list.text.Contains("/trial/"))
                     {
+                        await CheckPromoLink(config, list.text);
                         continue;
                     }
+
+                    if (list.text != null && ignoredText.Any(t => list.text.Contains(t,StringComparison.CurrentCultureIgnoreCase)))
+                        {
+                        continue;
+                    }
+                }
+                if (ignoredUsers.Contains((int)list.fromUser.id))
+                {
+                    continue;
                 }
                 List<long> messagePreviewIds = new();
                 if (list.previews != null && list.previews.Count > 0)
@@ -1461,7 +1675,7 @@ public class APIHelper : IAPIHelper
                 {
                     foreach (Messages.Medium medium in list.media)
                     {
-                        if (medium.canView && medium.source.source != null && !medium.source.source.Contains("upload"))
+                        if (medium.canView && medium.source!=null && medium.source.source != null && !medium.source.source.Contains("upload"))
                         {
                             if (medium.type == "photo" && !config.DownloadImages)
                             {
@@ -1517,7 +1731,7 @@ public class APIHelper : IAPIHelper
                 {
                     foreach (Messages.Medium medium in list.media)
                     {
-                        if (medium.canView && medium.source.source != null && !medium.source.source.Contains("upload") && messagePreviewIds.Contains(medium.id))
+                        if (medium.canView && medium.source !=null && medium.source.source != null && !medium.source.source.Contains("upload") && messagePreviewIds.Contains(medium.id))
                         {
                             if (medium.type == "photo" && !config.DownloadImages)
                             {
@@ -1570,7 +1784,7 @@ public class APIHelper : IAPIHelper
                     }
                 }
             }
-
+            }
             return messageCollection;
         }
         catch (Exception ex)
@@ -1801,7 +2015,7 @@ public class APIHelper : IAPIHelper
                 }
             }
 
-            if (paidMessages.list != null && paidMessages.list.Count > 0)
+            if (paidMessages != null && paidMessages.list != null && paidMessages.list.Count > 0)
             {
                 foreach (Purchased.List purchase in paidMessages.list.Where(p => p.responseType == "message").OrderByDescending(p => p.postedAt ?? p.createdAt))
                 {

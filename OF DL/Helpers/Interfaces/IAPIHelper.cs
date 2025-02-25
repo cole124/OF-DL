@@ -30,7 +30,7 @@ namespace OF_DL.Helpers
         Task<User> GetUserInfo(string endpoint);
         Task<JObject> GetUserInfoById(string endpoint);
         Dictionary<string, string> GetDynamicHeaders(string path, string queryParam);
-        Task<Dictionary<string, int>> GetActiveSubscriptions(string endpoint, bool includeRestrictedSubscriptions, IDownloadConfig config);
-        Task<Dictionary<string, int>> GetExpiredSubscriptions(string endpoint, bool includeRestrictedSubscriptions, IDownloadConfig config);
+        Task<Dictionary<string, (int id, DateTime expiration)>> GetActiveSubscriptions(string endpoint, bool includeRestrictedSubscriptions, IDownloadConfig config);
+        Task<Dictionary<string, (int id, DateTime expiration)>> GetExpiredSubscriptions(string endpoint, bool includeRestrictedSubscriptions, IDownloadConfig config);
     }
 }
