@@ -365,3 +365,5 @@ FodyWeavers.xsd
 /OF DL/config.json
 /OF DL/device_client_id_blob
 /OF DL/device_private_key
+/OF DL/Helpers/APIHelper.cs.bak
+/OF DL/Entities/Subscriptions.cs.bak
